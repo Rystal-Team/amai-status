@@ -1,6 +1,6 @@
 """Description: Create initial database schema with monitor_records table."""
 
-from sqlalchemy import Column, String, Integer, DateTime, Float, Boolean, create_engine
+from sqlalchemy import Column, String, Integer, DateTime, Float, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 
 Base = declarative_base()

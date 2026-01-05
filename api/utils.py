@@ -1,6 +1,5 @@
 from datetime import timedelta
 from typing import List
-from sqlalchemy.orm import Session
 
 from .models import MonitorRecord
 

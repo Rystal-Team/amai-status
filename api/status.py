@@ -1,8 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from datetime import datetime, timedelta
-from sqlalchemy.orm import Session
 
-from .models import AllStatusResponse, MonitorStatusDetail, CurrentStatus, StatusRecord
+from .models import AllStatusResponse
 import database
 
 router = APIRouter(prefix="/api/status", tags=["Status"])
