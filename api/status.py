@@ -121,7 +121,6 @@ def create_status_router(monitors_config: list):
 
                 monitor_data = {
                     "name": monitor["name"],
-                    "url": monitor["url"],
                     "current_status": {
                         "is_up": latest.is_up if latest else None,
                         "status_code": latest.status_code if latest else None,

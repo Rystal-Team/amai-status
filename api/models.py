@@ -87,12 +87,11 @@ class CurrentStatus(BaseModel):
 class MonitorStatusDetail(BaseModel):
     """Detailed status information for a monitor.
 
-    Includes the monitor's name, URL, current status, and complete status
+    Includes the monitor's name, current status, and complete status
     history records over the requested time period.
     """
 
     name: str = Field(..., description="Monitor name")
-    url: str = Field(..., description="Monitor URL")
     current_status: CurrentStatus = Field(..., description="Current status")
     history: List[StatusRecord] = Field(..., description="Status history records")
 
@@ -100,7 +99,6 @@ class MonitorStatusDetail(BaseModel):
         json_schema_extra = {
             "example": {
                 "name": "Google Search",
-                "url": "https://www.google.com",
                 "current_status": {
                     "is_up": True,
                     "status_code": 200,
@@ -142,7 +140,6 @@ class AllStatusResponse(BaseModel):
                 "monitors": [
                     {
                         "name": "Google Search",
-                        "url": "https://www.google.com",
                         "current_status": {
                             "is_up": True,
                             "status_code": 200,
