@@ -1,6 +1,4 @@
-"""
-Description: Add composite indexes and optimize queries for better performance.
-"""
+"""Description: Add composite indexes and optimize queries for better performance."""
 
 from sqlalchemy import text
 

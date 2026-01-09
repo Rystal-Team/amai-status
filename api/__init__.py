@@ -1,5 +1,3 @@
-from fastapi import APIRouter
-
 from .monitors import create_monitors_router
 from .status import create_status_router
 from .heartbeat import create_heartbeat_router
