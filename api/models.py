@@ -25,17 +25,13 @@ class MonitorRecord(Base):
 class MonitorInfo(BaseModel):
     """Monitor information model.
 
-    Represents basic information about a configured monitor including its
-    name and the URL being monitored.
+    Represents basic information about a configured monitor including its name.
     """
 
     name: str = Field(..., description="Monitor name")
-    url: str = Field(..., description="Monitor URL")
 
     class Config:
-        json_schema_extra = {
-            "example": {"name": "Google Search", "url": "https://www.google.com"}
-        }
+        json_schema_extra = {"example": {"name": "Google Search"}}
 
 
 class StatusRecord(BaseModel):
