@@ -24,17 +24,16 @@ def create_monitors_router(monitors_config: list):
         response_model=List[MonitorInfo],
         status_code=200,
         summary="List all monitors",
-        description="Get a list of all configured monitors with their names and URLs",
+        description="Get a list of all configured monitors",
     )
     def get_monitors():
         """Get list of all monitors.
 
-        Returns a list of all monitors that are being monitored by the system,
-        including their names and URLs.
+        Returns a list of all monitors that are being monitored by the system.
 
         Returns:
-            list: List of MonitorInfo objects with monitor names and URLs.
+            list: List of MonitorInfo objects with monitor names.
         """
-        return [{"name": m["name"], "url": m["url"]} for m in monitors_config]
+        return [{"name": m["name"]} for m in monitors_config]
 
     return router
