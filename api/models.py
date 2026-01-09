@@ -100,7 +100,6 @@ class MonitorStatusDetail(BaseModel):
         json_schema_extra = {
             "example": {
                 "name": "Google Search",
-                "url": "https://www.google.com",
                 "current_status": {
                     "is_up": True,
                     "status_code": 200,
@@ -142,7 +141,6 @@ class AllStatusResponse(BaseModel):
                 "monitors": [
                     {
                         "name": "Google Search",
-                        "url": "https://www.google.com",
                         "current_status": {
                             "is_up": True,
                             "status_code": 200,
