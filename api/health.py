@@ -81,5 +81,5 @@ def get_client_ip(request: Request):
         client_ip = client_ip.split(",")[0].strip()
     else:
         client_ip = request.client.host if request.client else "unknown"
-    
+
     return {"client_ip": client_ip, "status": "ok"}
