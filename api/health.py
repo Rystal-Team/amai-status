@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
 from .models import HealthResponse
@@ -48,3 +48,38 @@ def get_version():
         VersionResponse: API version information with status.
     """
     return {"api_version": API_VERSION, "status": "ok"}
+
+
+class ClientIPResponse(BaseModel):
+    """Client IP information."""
+
+    client_ip: str
+    status: str = "ok"
+
+
+@router.get(
+    "/client-ip",
+    response_model=ClientIPResponse,
+    status_code=200,
+    summary="Client IP address",
+    description="Get the client's IP address as seen by the server",
+)
+def get_client_ip(request: Request):
+    """Get client IP address.
+
+    Returns the IP address of the client making the request.
+    Handles X-Forwarded-For header for requests through proxies.
+
+    Args:
+        request (Request): The incoming request object.
+
+    Returns:
+        ClientIPResponse: Client IP address information.
+    """
+    client_ip = request.headers.get("X-Forwarded-For")
+    if client_ip:
+        client_ip = client_ip.split(",")[0].strip()
+    else:
+        client_ip = request.client.host if request.client else "unknown"
+    
+    return {"client_ip": client_ip, "status": "ok"}
