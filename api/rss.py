@@ -64,7 +64,9 @@ def create_rss_router(monitors_config: list):
                 fe = fg.add_entry()
                 fe.id(f"{monitor_name}-{record.timestamp.isoformat()}")
                 fe.title(f"{monitor_name}: {status_text}")
-                fe.link("redacted")  # Hide actual link for security/privacy
+                fe.link(
+                    href="", rel="alternate"
+                )  # Hide actual link for security/privacy
                 fe.description(
                     f"Status: {status_text}<br/>"
                     f"Status Code: {record.status_code or 'N/A'}<br/>"
