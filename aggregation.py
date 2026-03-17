@@ -1,0 +1,222 @@
+from datetime import datetime, timedelta
+import logging
+from sqlalchemy import text
+
+from api.models import HeartbeatAggregate, MonitorRecord
+
+logger = logging.getLogger(__name__)
+
+AGGREGATE_INTERVALS = ("hour", "day", "week")
+
+
+def get_bucket_start(timestamp: datetime, interval: str) -> datetime:
+    """Return normalized bucket start for an interval."""
+    if interval == "hour":
+        return timestamp.replace(minute=0, second=0, microsecond=0)
+    if interval == "day":
+        return timestamp.replace(hour=0, minute=0, second=0, microsecond=0)
+    if interval == "week":
+        start = timestamp - timedelta(days=timestamp.weekday())
+        return start.replace(hour=0, minute=0, second=0, microsecond=0)
+    raise ValueError(f"Unsupported interval: {interval}")
+
+
+def _compute_status(count: int, down_count: int, degraded_count: int, threshold: float):
+    issue_percentage = ((down_count + degraded_count) * 100.0 / count) if count else 0.0
+    if down_count > 0:
+        status = "down"
+    elif issue_percentage > threshold:
+        status = "degraded"
+    else:
+        status = "up"
+    return status, issue_percentage
+
+
+def upsert_aggregates_for_record(db, record: MonitorRecord, app_config: dict):
+    """Incrementally update hour/day/week aggregate buckets for one monitor record."""
+    degraded_threshold_seconds = app_config.get("degraded_threshold", 200) / 1000
+    degraded_percentage_threshold = app_config.get("degraded_percentage_threshold", 10)
+    now = datetime.now()
+
+    is_degraded = (
+        record.is_up
+        and record.response_time is not None
+        and record.response_time > degraded_threshold_seconds
+    )
+
+    for interval in AGGREGATE_INTERVALS:
+        bucket_start = get_bucket_start(record.timestamp, interval)
+        aggregate = (
+            db.query(HeartbeatAggregate)
+            .filter(
+                HeartbeatAggregate.monitor_name == record.monitor_name,
+                HeartbeatAggregate.interval == interval,
+                HeartbeatAggregate.bucket_start == bucket_start,
+            )
+            .one_or_none()
+        )
+
+        if aggregate is None:
+            response_sample_count = 1 if record.response_time is not None else 0
+            avg_response_time = record.response_time if record.response_time is not None else None
+            count = 1
+            down_count = 0 if record.is_up else 1
+            degraded_count = 1 if is_degraded else 0
+
+            status, issue_percentage = _compute_status(
+                count, down_count, degraded_count, degraded_percentage_threshold
+            )
+            aggregate = HeartbeatAggregate(
+                monitor_name=record.monitor_name,
+                interval=interval,
+                bucket_start=bucket_start,
+                count=count,
+                down_count=down_count,
+                degraded_count=degraded_count,
+                response_sample_count=response_sample_count,
+                avg_response_time=avg_response_time,
+                issue_percentage=issue_percentage,
+                status=status,
+                is_up=status == "up",
+                updated_at=now,
+            )
+            db.add(aggregate)
+            continue
+
+        aggregate.count += 1
+        if not record.is_up:
+            aggregate.down_count += 1
+        if is_degraded:
+            aggregate.degraded_count += 1
+
+        if record.response_time is not None:
+            prev_samples = aggregate.response_sample_count
+            prev_total = (aggregate.avg_response_time or 0.0) * prev_samples
+            aggregate.response_sample_count = prev_samples + 1
+            aggregate.avg_response_time = (
+                prev_total + record.response_time
+            ) / aggregate.response_sample_count
+
+        status, issue_percentage = _compute_status(
+            aggregate.count,
+            aggregate.down_count,
+            aggregate.degraded_count,
+            degraded_percentage_threshold,
+        )
+        aggregate.issue_percentage = issue_percentage
+        aggregate.status = status
+        aggregate.is_up = status == "up"
+        aggregate.updated_at = now
+
+
+def backfill_missing_aggregates(engine, app_config: dict):
+    """Backfill precomputed buckets from historical monitor records.
+
+    Uses INSERT OR IGNORE so existing aggregate buckets are preserved and only
+    missing buckets from pre-upgrade history are inserted.
+    """
+    degraded_threshold_seconds = app_config.get("degraded_threshold", 200) / 1000
+    degraded_percentage_threshold = app_config.get("degraded_percentage_threshold", 10)
+
+    bucket_expr = {
+        "hour": "strftime('%Y-%m-%dT%H:00:00', timestamp)",
+        "day": "strftime('%Y-%m-%dT00:00:00', timestamp)",
+        "week": (
+            "strftime('%Y-%m-%dT00:00:00', "
+            "datetime(timestamp, '-' || ((cast(strftime('%w', timestamp) as integer) + 6) % 7) || ' days'))"
+        ),
+    }
+
+    with engine.connect() as connection:
+        for interval in AGGREGATE_INTERVALS:
+            expr = bucket_expr[interval]
+            query = text(
+                f"""
+                INSERT OR IGNORE INTO heartbeat_aggregates (
+                    monitor_name,
+                    interval,
+                    bucket_start,
+                    count,
+                    down_count,
+                    degraded_count,
+                    response_sample_count,
+                    avg_response_time,
+                    issue_percentage,
+                    status,
+                    is_up,
+                    updated_at
+                )
+                SELECT
+                    grouped.monitor_name,
+                    :interval AS interval,
+                    grouped.bucket_start,
+                    grouped.total_count,
+                    grouped.down_count,
+                    grouped.degraded_count,
+                    grouped.response_sample_count,
+                    grouped.avg_response_time,
+                    CASE
+                        WHEN grouped.total_count > 0
+                            THEN ((grouped.down_count + grouped.degraded_count) * 100.0 / grouped.total_count)
+                        ELSE 0
+                    END AS issue_percentage,
+                    CASE
+                        WHEN grouped.down_count > 0 THEN 'down'
+                        WHEN (
+                            CASE
+                                WHEN grouped.total_count > 0
+                                    THEN ((grouped.down_count + grouped.degraded_count) * 100.0 / grouped.total_count)
+                                ELSE 0
+                            END
+                        ) > :degraded_percentage_threshold THEN 'degraded'
+                        ELSE 'up'
+                    END AS status,
+                    CASE
+                        WHEN grouped.down_count = 0 AND (
+                            CASE
+                                WHEN grouped.total_count > 0
+                                    THEN ((grouped.down_count + grouped.degraded_count) * 100.0 / grouped.total_count)
+                                ELSE 0
+                            END
+                        ) <= :degraded_percentage_threshold THEN 1
+                        ELSE 0
+                    END AS is_up,
+                    CURRENT_TIMESTAMP AS updated_at
+                FROM (
+                    SELECT
+                        monitor_name,
+                        {expr} AS bucket_start,
+                        COUNT(*) AS total_count,
+                        SUM(CASE WHEN is_up = 0 THEN 1 ELSE 0 END) AS down_count,
+                        SUM(
+                            CASE
+                                WHEN is_up = 1
+                                    AND response_time IS NOT NULL
+                                    AND response_time > :degraded_threshold_seconds
+                                THEN 1
+                                ELSE 0
+                            END
+                        ) AS degraded_count,
+                        SUM(CASE WHEN response_time IS NOT NULL THEN 1 ELSE 0 END) AS response_sample_count,
+                        AVG(response_time) AS avg_response_time
+                    FROM monitor_records
+                    GROUP BY monitor_name, {expr}
+                ) AS grouped
+                """
+            )
+
+            result = connection.execute(
+                query,
+                {
+                    "interval": interval,
+                    "degraded_threshold_seconds": degraded_threshold_seconds,
+                    "degraded_percentage_threshold": degraded_percentage_threshold,
+                },
+            )
+            logger.info(
+                "Backfill interval %s inserted %s missing aggregate buckets",
+                interval,
+                result.rowcount,
+            )
+
+        connection.commit()
