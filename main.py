@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import config
 import database
 import monitor
+import aggregation
 from api import init_routers
 from version import API_VERSION
 
@@ -29,9 +30,10 @@ async def lifespan(app: FastAPI):
     Yields:
         None
     """
-    monitors_config, _, _ = config.load_config()
+    monitors_config, app_config, _ = config.load_config()
     database.init_db()
-    task = asyncio.create_task(monitor.monitor_service(monitors_config))
+    aggregation.backfill_missing_aggregates(database.engine, app_config)
+    task = asyncio.create_task(monitor.monitor_service(monitors_config, app_config))
     yield
     task.cancel()
     try:
