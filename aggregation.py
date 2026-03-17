@@ -9,6 +9,16 @@ logger = logging.getLogger(__name__)
 AGGREGATE_INTERVALS = ("hour", "day", "week")
 
 
+def _serialize_bucket_start(bucket_start: datetime) -> str:
+    """Return canonical SQLite bucket datetime string.
+
+    SQLite DateTime values can be persisted in multiple textual formats.
+    Using one canonical format prevents logically-identical buckets from
+    bypassing the unique constraint due to string differences.
+    """
+    return bucket_start.strftime("%Y-%m-%d %H:%M:%S")
+
+
 def get_bucket_start(timestamp: datetime, interval: str) -> datetime:
     """Return normalized bucket start for an interval."""
     if interval == "hour":
@@ -46,12 +56,13 @@ def upsert_aggregates_for_record(db, record: MonitorRecord, app_config: dict):
 
     for interval in AGGREGATE_INTERVALS:
         bucket_start = get_bucket_start(record.timestamp, interval)
+        bucket_start_str = _serialize_bucket_start(bucket_start)
         aggregate = (
             db.query(HeartbeatAggregate)
             .filter(
                 HeartbeatAggregate.monitor_name == record.monitor_name,
                 HeartbeatAggregate.interval == interval,
-                HeartbeatAggregate.bucket_start == bucket_start,
+                HeartbeatAggregate.bucket_start == bucket_start_str,
             )
             .one_or_none()
         )
@@ -71,7 +82,7 @@ def upsert_aggregates_for_record(db, record: MonitorRecord, app_config: dict):
             aggregate = HeartbeatAggregate(
                 monitor_name=record.monitor_name,
                 interval=interval,
-                bucket_start=bucket_start,
+                bucket_start=bucket_start_str,
                 count=count,
                 down_count=down_count,
                 degraded_count=degraded_count,
@@ -111,6 +122,117 @@ def upsert_aggregates_for_record(db, record: MonitorRecord, app_config: dict):
         aggregate.updated_at = now
 
 
+def merge_duplicate_aggregates(engine, app_config: dict):
+    """Merge duplicate aggregate buckets created with mixed timestamp formats."""
+    degraded_percentage_threshold = app_config.get("degraded_percentage_threshold", 10)
+
+    duplicate_groups_query = text(
+        """
+        SELECT
+            monitor_name,
+            interval,
+            datetime(bucket_start) AS normalized_bucket_start,
+            MIN(id) AS keep_id,
+            COUNT(*) AS row_count,
+            SUM(count) AS total_count,
+            SUM(down_count) AS total_down_count,
+            SUM(degraded_count) AS total_degraded_count,
+            SUM(response_sample_count) AS total_response_samples,
+            SUM(COALESCE(avg_response_time, 0) * COALESCE(response_sample_count, 0)) AS total_response_sum,
+            MAX(updated_at) AS latest_updated_at
+        FROM heartbeat_aggregates
+        GROUP BY monitor_name, interval, datetime(bucket_start)
+        HAVING COUNT(*) > 1
+        """
+    )
+
+    with engine.connect() as connection:
+        duplicate_groups = connection.execute(duplicate_groups_query).mappings().all()
+        if not duplicate_groups:
+            return
+
+        deleted_rows = 0
+
+        for group in duplicate_groups:
+            total_count = int(group["total_count"] or 0)
+            total_down_count = int(group["total_down_count"] or 0)
+            total_degraded_count = int(group["total_degraded_count"] or 0)
+            total_response_samples = int(group["total_response_samples"] or 0)
+
+            avg_response_time = (
+                float(group["total_response_sum"]) / total_response_samples
+                if total_response_samples > 0
+                else None
+            )
+
+            status, issue_percentage = _compute_status(
+                total_count,
+                total_down_count,
+                total_degraded_count,
+                degraded_percentage_threshold,
+            )
+
+            connection.execute(
+                text(
+                    """
+                    UPDATE heartbeat_aggregates
+                    SET
+                        bucket_start = :normalized_bucket_start,
+                        count = :total_count,
+                        down_count = :total_down_count,
+                        degraded_count = :total_degraded_count,
+                        response_sample_count = :total_response_samples,
+                        avg_response_time = :avg_response_time,
+                        issue_percentage = :issue_percentage,
+                        status = :status,
+                        is_up = :is_up,
+                        updated_at = :updated_at
+                    WHERE id = :keep_id
+                    """
+                ),
+                {
+                    "normalized_bucket_start": group["normalized_bucket_start"],
+                    "total_count": total_count,
+                    "total_down_count": total_down_count,
+                    "total_degraded_count": total_degraded_count,
+                    "total_response_samples": total_response_samples,
+                    "avg_response_time": avg_response_time,
+                    "issue_percentage": issue_percentage,
+                    "status": status,
+                    "is_up": 1 if status == "up" else 0,
+                    "updated_at": group["latest_updated_at"] or datetime.now(),
+                    "keep_id": group["keep_id"],
+                },
+            )
+
+            delete_result = connection.execute(
+                text(
+                    """
+                    DELETE FROM heartbeat_aggregates
+                    WHERE
+                        monitor_name = :monitor_name
+                        AND interval = :interval
+                        AND datetime(bucket_start) = :normalized_bucket_start
+                        AND id != :keep_id
+                    """
+                ),
+                {
+                    "monitor_name": group["monitor_name"],
+                    "interval": group["interval"],
+                    "normalized_bucket_start": group["normalized_bucket_start"],
+                    "keep_id": group["keep_id"],
+                },
+            )
+            deleted_rows += delete_result.rowcount or 0
+
+        connection.commit()
+        logger.info(
+            "Merged %s duplicate aggregate groups and deleted %s rows",
+            len(duplicate_groups),
+            deleted_rows,
+        )
+
+
 def backfill_missing_aggregates(engine, app_config: dict):
     """Backfill precomputed buckets from historical monitor records.
 
@@ -121,10 +243,10 @@ def backfill_missing_aggregates(engine, app_config: dict):
     degraded_percentage_threshold = app_config.get("degraded_percentage_threshold", 10)
 
     bucket_expr = {
-        "hour": "strftime('%Y-%m-%dT%H:00:00', timestamp)",
-        "day": "strftime('%Y-%m-%dT00:00:00', timestamp)",
+        "hour": "strftime('%Y-%m-%d %H:00:00', timestamp)",
+        "day": "strftime('%Y-%m-%d 00:00:00', timestamp)",
         "week": (
-            "strftime('%Y-%m-%dT00:00:00', "
+            "strftime('%Y-%m-%d 00:00:00', "
             "datetime(timestamp, '-' || ((cast(strftime('%w', timestamp) as integer) + 6) % 7) || ' days'))"
         ),
     }
