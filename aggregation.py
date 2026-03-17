@@ -130,6 +130,16 @@ def backfill_missing_aggregates(engine, app_config: dict):
     }
 
     with engine.connect() as connection:
+        existing_count = connection.execute(
+            text("SELECT COUNT(1) FROM heartbeat_aggregates")
+        ).scalar()
+        if existing_count and existing_count > 0:
+            logger.info(
+                "Skipping aggregate backfill because %s aggregate rows already exist",
+                existing_count,
+            )
+            return
+
         for interval in AGGREGATE_INTERVALS:
             expr = bucket_expr[interval]
             query = text(
