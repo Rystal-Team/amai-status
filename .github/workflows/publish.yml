@@ -1,0 +1,133 @@
+name: Publish
+
+on:
+    workflow_dispatch:
+        inputs:
+            release_type:
+                description: "Choose release type"
+                required: true
+                type: choice
+                options:
+                    - major
+                    - minor
+                    - patch
+                default: patch
+
+permissions:
+    contents: write
+
+jobs:
+    publish:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+              with:
+                  token: ${{ secrets.GITHUB_TOKEN }}
+                  fetch-depth: 0
+
+            - name: Setup Git
+              run: |
+                  git config user.name "github-actions[bot]"
+                  git config user.email "github-actions[bot]@users.noreply.github.com"
+
+            - name: Setup Python
+              uses: actions/setup-python@v5
+              with:
+                  python-version: "3.11"
+
+            - name: Bump backend versions
+              id: bump_version
+              env:
+                  RELEASE_TYPE: ${{ github.event.inputs.release_type }}
+                  DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+              run: |
+                  CURRENT_VERSION=$(python - <<'PY'
+                  import re
+                  text = open('version.py', encoding='utf-8').read()
+                  m = re.search(r'__version__\s*=\s*"([^"]+)"', text)
+                  if not m:
+                      raise SystemExit('Could not find __version__ in version.py')
+                  print(m.group(1))
+                  PY
+                  )
+
+                  MAJOR=$(echo "$CURRENT_VERSION" | cut -d. -f1)
+                  MINOR=$(echo "$CURRENT_VERSION" | cut -d. -f2)
+                  PATCH=$(echo "$CURRENT_VERSION" | cut -d. -f3)
+
+                  if [ -z "$PATCH" ]; then PATCH=0; fi
+
+                  echo "Current version: $CURRENT_VERSION"
+
+                  if [ "$RELEASE_TYPE" = "major" ]; then
+                    MAJOR=$((MAJOR + 1))
+                    MINOR=0
+                    PATCH=0
+                  elif [ "$RELEASE_TYPE" = "minor" ]; then
+                    MINOR=$((MINOR + 1))
+                    PATCH=0
+                  else
+                    PATCH=$((PATCH + 1))
+                  fi
+
+                  NEW_VERSION="$MAJOR.$MINOR.$PATCH"
+                  echo "New version: $NEW_VERSION"
+
+                  python - "$NEW_VERSION" <<'PY'
+                  import re
+                  import sys
+
+                  new_version = sys.argv[1]
+                  path = 'version.py'
+                  text = open(path, encoding='utf-8').read()
+                  text = re.sub(r'__version__\s*=\s*"[^"]+"', f'__version__ = "{new_version}"', text, count=1)
+                  text = re.sub(r'__api_version__\s*=\s*"[^"]+"', f'__api_version__ = "{new_version}"', text, count=1)
+                  open(path, 'w', encoding='utf-8', newline='\n').write(text)
+                  PY
+
+                  git add version.py
+                  if ! git diff --cached --quiet; then
+                    git commit -m "Bump version to $NEW_VERSION"
+                    git push origin "HEAD:$DEFAULT_BRANCH"
+                  else
+                    echo "No changes to commit"
+                  fi
+
+                  echo "version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+
+            - name: Generate changelog
+              id: changelog
+              run: |
+                  PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+                  if [ -z "$PREV_TAG" ]; then
+                    COMMITS=$(git log --pretty=format:"- %s by @%an")
+                  else
+                    COMMITS=$(git log "$PREV_TAG"..HEAD --pretty=format:"- %s by @%an")
+                  fi
+
+                  echo "commits<<EOF" >> "$GITHUB_OUTPUT"
+                  echo "$COMMITS" >> "$GITHUB_OUTPUT"
+                  echo "EOF" >> "$GITHUB_OUTPUT"
+
+            - name: Create GitHub Release
+              uses: softprops/action-gh-release@v2
+              with:
+                  tag_name: ${{ steps.bump_version.outputs.version }}
+                  name: "Release ${{ steps.bump_version.outputs.version }}"
+                  body: |
+                      ## Changelog
+                      ${{ steps.changelog.outputs.commits }}
+                  generate_release_notes: true
+                  draft: false
+                  prerelease: false
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Push to stable branch
+              env:
+                  DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+              run: |
+                  git fetch origin "$DEFAULT_BRANCH"
+                  git checkout -B stable "origin/$DEFAULT_BRANCH"
+                  git push -f origin stable
