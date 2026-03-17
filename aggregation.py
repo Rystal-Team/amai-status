@@ -9,16 +9,6 @@ logger = logging.getLogger(__name__)
 AGGREGATE_INTERVALS = ("hour", "day", "week")
 
 
-def _serialize_bucket_start(bucket_start: datetime) -> str:
-    """Return canonical SQLite bucket datetime string.
-
-    SQLite DateTime values can be persisted in multiple textual formats.
-    Using one canonical format prevents logically-identical buckets from
-    bypassing the unique constraint due to string differences.
-    """
-    return bucket_start.strftime("%Y-%m-%d %H:%M:%S")
-
-
 def get_bucket_start(timestamp: datetime, interval: str) -> datetime:
     """Return normalized bucket start for an interval."""
     if interval == "hour":
@@ -56,13 +46,12 @@ def upsert_aggregates_for_record(db, record: MonitorRecord, app_config: dict):
 
     for interval in AGGREGATE_INTERVALS:
         bucket_start = get_bucket_start(record.timestamp, interval)
-        bucket_start_str = _serialize_bucket_start(bucket_start)
         aggregate = (
             db.query(HeartbeatAggregate)
             .filter(
                 HeartbeatAggregate.monitor_name == record.monitor_name,
                 HeartbeatAggregate.interval == interval,
-                HeartbeatAggregate.bucket_start == bucket_start_str,
+                HeartbeatAggregate.bucket_start == bucket_start,
             )
             .one_or_none()
         )
@@ -82,7 +71,7 @@ def upsert_aggregates_for_record(db, record: MonitorRecord, app_config: dict):
             aggregate = HeartbeatAggregate(
                 monitor_name=record.monitor_name,
                 interval=interval,
-                bucket_start=bucket_start_str,
+                bucket_start=bucket_start,
                 count=count,
                 down_count=down_count,
                 degraded_count=degraded_count,
