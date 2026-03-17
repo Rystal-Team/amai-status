@@ -28,6 +28,19 @@ def create_heartbeat_router(app_config: dict):
         "week": 104 * 7 * 24,
     }
 
+    def aggregate_row_to_node(row):
+        return {
+            "timestamp": row.bucket_start.isoformat(),
+            "is_up": row.is_up,
+            "status": row.status,
+            "response_time": row.avg_response_time,
+            "count": row.count,
+            "avg_response_time": row.avg_response_time,
+            "degraded_count": row.degraded_count,
+            "down_count": row.down_count,
+            "issue_percentage": row.issue_percentage,
+        }
+
     @router.get(
         "",
         response_model=dict,
@@ -54,7 +67,7 @@ def create_heartbeat_router(app_config: dict):
         Raises:
             HTTPException: 400 if invalid interval, 404 if monitor not found.
         """
-        from .models import MonitorRecord
+        from .models import MonitorRecord, HeartbeatAggregate
 
         if interval not in valid_intervals:
             raise HTTPException(
@@ -65,23 +78,58 @@ def create_heartbeat_router(app_config: dict):
         db = database.SessionLocal()
         try:
             cutoff_time = datetime.now() - timedelta(hours=hours)
-            records = (
-                db.query(MonitorRecord)
-                .filter(
-                    MonitorRecord.monitor_name == monitor_name,
-                    MonitorRecord.timestamp >= cutoff_time,
-                )
-                .order_by(MonitorRecord.timestamp.asc())
-                .all()
-            )
 
-            if not records:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Monitor '{monitor_name}' not found or no data available",
+            if interval == "all":
+                records = (
+                    db.query(MonitorRecord)
+                    .filter(
+                        MonitorRecord.monitor_name == monitor_name,
+                        MonitorRecord.timestamp >= cutoff_time,
+                    )
+                    .order_by(MonitorRecord.timestamp.asc())
+                    .all()
                 )
 
-            aggregated_data = aggregate_heartbeat_data(records, interval, app_config)
+                if not records:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Monitor '{monitor_name}' not found or no data available",
+                    )
+
+                aggregated_data = aggregate_heartbeat_data(records, interval, app_config)
+            else:
+                aggregate_rows = (
+                    db.query(HeartbeatAggregate)
+                    .filter(
+                        HeartbeatAggregate.monitor_name == monitor_name,
+                        HeartbeatAggregate.interval == interval,
+                        HeartbeatAggregate.bucket_start >= cutoff_time,
+                    )
+                    .order_by(HeartbeatAggregate.bucket_start.asc())
+                    .all()
+                )
+
+                if not aggregate_rows:
+                    raw_records = (
+                        db.query(MonitorRecord)
+                        .filter(
+                            MonitorRecord.monitor_name == monitor_name,
+                            MonitorRecord.timestamp >= cutoff_time,
+                        )
+                        .order_by(MonitorRecord.timestamp.asc())
+                        .all()
+                    )
+
+                    if not raw_records:
+                        raise HTTPException(
+                            status_code=404,
+                            detail=f"Monitor '{monitor_name}' not found or no data available",
+                        )
+                    aggregated_data = aggregate_heartbeat_data(
+                        raw_records, interval, app_config
+                    )
+                else:
+                    aggregated_data = [aggregate_row_to_node(row) for row in aggregate_rows]
 
             return {
                 "monitor_name": monitor_name,
@@ -119,7 +167,7 @@ def create_heartbeat_router(app_config: dict):
         Raises:
             HTTPException: 400 if interval list contains unsupported values.
         """
-        from .models import MonitorRecord
+        from .models import MonitorRecord, HeartbeatAggregate
 
         requested_intervals = [i.strip() for i in intervals.split(",") if i.strip()]
         if not requested_intervals:
@@ -149,38 +197,65 @@ def create_heartbeat_router(app_config: dict):
 
         db = database.SessionLocal()
         try:
-            query = db.query(MonitorRecord).filter(
-                MonitorRecord.timestamp >= max_cutoff
-            )
-            if requested_monitor_names:
-                query = query.filter(
-                    MonitorRecord.monitor_name.in_(requested_monitor_names)
+            target_monitors = requested_monitor_names
+            if not target_monitors:
+                rows = db.query(MonitorRecord.monitor_name).distinct().all()
+                target_monitors = sorted([row[0] for row in rows])
+
+            precomputed = {}
+            for monitor_name in target_monitors:
+                precomputed[monitor_name] = {
+                    interval: [] for interval in requested_intervals
+                }
+
+            intervals_without_all = [i for i in requested_intervals if i != "all"]
+            if intervals_without_all and target_monitors:
+                aggregate_rows = (
+                    db.query(HeartbeatAggregate)
+                    .filter(
+                        HeartbeatAggregate.monitor_name.in_(target_monitors),
+                        HeartbeatAggregate.interval.in_(intervals_without_all),
+                        HeartbeatAggregate.bucket_start >= max_cutoff,
+                    )
+                    .order_by(
+                        HeartbeatAggregate.monitor_name.asc(),
+                        HeartbeatAggregate.interval.asc(),
+                        HeartbeatAggregate.bucket_start.asc(),
+                    )
+                    .all()
                 )
 
-            all_records = query.order_by(
-                MonitorRecord.monitor_name.asc(), MonitorRecord.timestamp.asc()
-            ).all()
+                cutoff_by_interval = {
+                    interval: now - timedelta(hours=hours_by_interval[interval])
+                    for interval in intervals_without_all
+                }
 
-            records_by_monitor = {}
-            for record in all_records:
-                records_by_monitor.setdefault(record.monitor_name, []).append(record)
+                for row in aggregate_rows:
+                    if row.bucket_start < cutoff_by_interval[row.interval]:
+                        continue
+                    precomputed[row.monitor_name][row.interval].append(
+                        aggregate_row_to_node(row)
+                    )
 
-            target_monitors = requested_monitor_names or sorted(
-                records_by_monitor.keys()
-            )
-            precomputed = {}
+            if "all" in requested_intervals and target_monitors:
+                all_cutoff = now - timedelta(hours=hours_by_interval["all"])
+                raw_query = db.query(MonitorRecord).filter(
+                    MonitorRecord.timestamp >= all_cutoff,
+                    MonitorRecord.monitor_name.in_(target_monitors),
+                )
 
-            for monitor_name in target_monitors:
-                monitor_records = records_by_monitor.get(monitor_name, [])
-                precomputed[monitor_name] = {}
+                all_records = raw_query.order_by(
+                    MonitorRecord.monitor_name.asc(), MonitorRecord.timestamp.asc()
+                ).all()
 
-                for interval in requested_intervals:
-                    interval_cutoff = now - timedelta(hours=hours_by_interval[interval])
-                    interval_records = [
-                        r for r in monitor_records if r.timestamp >= interval_cutoff
-                    ]
-                    precomputed[monitor_name][interval] = aggregate_heartbeat_data(
-                        interval_records, interval, app_config
+                records_by_monitor = {}
+                for record in all_records:
+                    records_by_monitor.setdefault(record.monitor_name, []).append(record)
+
+                for monitor_name in target_monitors:
+                    monitor_records = records_by_monitor.get(monitor_name, [])
+                    precomputed[monitor_name]["all"] = aggregate_heartbeat_data(
+                        monitor_records, "all", app_config
                     )
 
             return {
