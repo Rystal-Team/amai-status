@@ -32,6 +32,7 @@ async def lifespan(app: FastAPI):
     """
     monitors_config, app_config, _ = config.load_config()
     database.init_db()
+    aggregation.merge_duplicate_aggregates(database.engine, app_config)
     aggregation.backfill_missing_aggregates(database.engine, app_config)
     task = asyncio.create_task(monitor.monitor_service(monitors_config, app_config))
     yield
