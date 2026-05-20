@@ -7,7 +7,7 @@ import database
 router = APIRouter(prefix="/api/heartbeat", tags=["Status"])
 
 
-def create_heartbeat_router(app_config: dict):
+def create_heartbeat_router(app_config: dict, monitors_config: list):
     """Create heartbeat router with config dependency.
 
     Factory function that creates an APIRouter for heartbeat endpoints.
@@ -28,7 +28,16 @@ def create_heartbeat_router(app_config: dict):
         "week": 104 * 7 * 24,
     }
 
+    monitor_interval_seconds = {
+        monitor["name"]: (monitor.get("interval", 30000) or 30000) / 1000
+        for monitor in monitors_config
+    }
+
+    def get_monitor_interval_seconds(monitor_name: str) -> float:
+        return monitor_interval_seconds.get(monitor_name, 30.0)
+
     def aggregate_row_to_node(row):
+        interval_seconds = get_monitor_interval_seconds(row.monitor_name)
         return {
             "timestamp": row.bucket_start.isoformat(),
             "is_up": row.is_up,
@@ -38,6 +47,8 @@ def create_heartbeat_router(app_config: dict):
             "avg_response_time": row.avg_response_time,
             "degraded_count": row.degraded_count,
             "down_count": row.down_count,
+            "degraded_duration_seconds": row.degraded_count * interval_seconds,
+            "down_duration_seconds": row.down_count * interval_seconds,
             "issue_percentage": row.issue_percentage,
         }
 
@@ -97,7 +108,10 @@ def create_heartbeat_router(app_config: dict):
                     )
 
                 aggregated_data = aggregate_heartbeat_data(
-                    records, interval, app_config
+                    records,
+                    interval,
+                    app_config,
+                    get_monitor_interval_seconds(monitor_name),
                 )
             else:
                 aggregate_rows = (
@@ -128,7 +142,10 @@ def create_heartbeat_router(app_config: dict):
                             detail=f"Monitor '{monitor_name}' not found or no data available",
                         )
                     aggregated_data = aggregate_heartbeat_data(
-                        raw_records, interval, app_config
+                        raw_records,
+                        interval,
+                        app_config,
+                        get_monitor_interval_seconds(monitor_name),
                     )
                 else:
                     aggregated_data = [
@@ -261,7 +278,10 @@ def create_heartbeat_router(app_config: dict):
                 for monitor_name in target_monitors:
                     monitor_records = records_by_monitor.get(monitor_name, [])
                     precomputed[monitor_name]["all"] = aggregate_heartbeat_data(
-                        monitor_records, "all", app_config
+                        monitor_records,
+                        "all",
+                        app_config,
+                        get_monitor_interval_seconds(monitor_name),
                     )
 
             return {

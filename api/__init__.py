@@ -24,7 +24,7 @@ def init_routers(monitors_config: list, app_config: dict):
     routers = [
         create_monitors_router(monitors_config),
         create_status_router(monitors_config),
-        create_heartbeat_router(app_config),
+        create_heartbeat_router(app_config, monitors_config),
         create_config_router(app_config),
         create_rss_router(monitors_config),
         create_assets_router(),
