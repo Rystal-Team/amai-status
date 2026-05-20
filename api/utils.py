@@ -5,7 +5,10 @@ from .models import MonitorRecord
 
 
 def aggregate_heartbeat_data(
-    records: List[MonitorRecord], interval: str, app_config: dict
+    records: List[MonitorRecord],
+    interval: str,
+    app_config: dict,
+    monitor_interval_seconds: float = 30.0,
 ) -> List[dict]:
     """
     Aggregate heartbeat records by time interval.
@@ -40,6 +43,12 @@ def aggregate_heartbeat_data(
                     "avg_response_time": r.response_time,
                     "degraded_count": 1 if is_degraded else 0,
                     "down_count": 0 if r.is_up else 1,
+                    "degraded_duration_seconds": (
+                        monitor_interval_seconds if is_degraded else 0
+                    ),
+                    "down_duration_seconds": (
+                        0 if r.is_up else monitor_interval_seconds
+                    ),
                 }
             )
         return aggregated
@@ -108,6 +117,9 @@ def aggregate_heartbeat_data(
                 "avg_response_time": avg_response_time,
                 "degraded_count": degraded_count,
                 "down_count": down_count,
+                "degraded_duration_seconds": degraded_count
+                * monitor_interval_seconds,
+                "down_duration_seconds": down_count * monitor_interval_seconds,
                 "issue_percentage": issue_percentage,
             }
         )
